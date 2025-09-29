@@ -22,7 +22,7 @@ def parse_date(date_str):
         return None
 
 def categorize_tasks(data, headers):
-    """Categorize tasks into today, this week, and all tasks"""
+    """Categorize tasks into today, this week, and other tasks"""
     today = datetime.now().date()
     week_end = today + timedelta(days=7)
     
@@ -35,10 +35,15 @@ def categorize_tasks(data, headers):
     
     today_tasks = []
     week_tasks = []
-    all_tasks = []
+    other_tasks = []
+    today_task_ids = set()
+    week_task_ids = set()
     
     for row in data:
-        all_tasks.append(row)
+        if not row or not row[0]:  # Skip rows without ID
+            continue
+            
+        task_id = row[0]
         
         if date_col_idx is not None and date_col_idx < len(row):
             task_date = parse_date(row[date_col_idx])
@@ -46,10 +51,16 @@ def categorize_tasks(data, headers):
                 task_date_only = task_date.date()
                 if task_date_only == today:
                     today_tasks.append(row)
+                    today_task_ids.add(task_id)
                 elif today <= task_date_only <= week_end:
                     week_tasks.append(row)
+                    week_task_ids.add(task_id)
+        
+        # Add to other tasks if not in today or this week
+        if task_id not in today_task_ids and task_id not in week_task_ids:
+            other_tasks.append(row)
     
-    return today_tasks, week_tasks, all_tasks
+    return today_tasks, week_tasks, other_tasks
 
 def create_html_preview(csv_path, output_path=None):
     """Create a beautiful HTML preview of a CSV file"""
@@ -67,7 +78,7 @@ def create_html_preview(csv_path, output_path=None):
         data = list(reader)
     
     # Categorize tasks
-    today_tasks, week_tasks, all_tasks = categorize_tasks(data, headers)
+    today_tasks, week_tasks, other_tasks = categorize_tasks(data, headers)
     
     # Generate HTML
     html_content = f"""
@@ -369,13 +380,69 @@ def create_html_preview(csv_path, output_path=None):
         }}
         
         function downloadCSV() {{
-            updateData();
+            // Start with just the header once - use original headers
+            const originalHeaders = ['ID', 'Task', 'Tag', 'Due date', 'Deadline', 'Recurring', 'Priority', 'Depends on', 'Status'];
+            let csvContent = originalHeaders.join(',') + '\\n';
             
-            // Create CSV content
-            let csvContent = headers.join(',') + '\\n';
-            originalData.forEach(row => {{
+            // Get all data rows (not header rows) from all sections
+            const allRows = [];
+            const seenIds = new Set();
+            
+            // Get all tbody rows from all sections
+            const allTbodyRows = document.querySelectorAll('tbody tr');
+            
+            allTbodyRows.forEach(row => {{
+                const cells = Array.from(row.querySelectorAll('td'));
+                
+                // Skip if no cells or if first cell looks like a header
+                if (cells.length === 0) return;
+                
+                const firstCellText = cells[0].textContent.trim();
+                
+                // Skip header rows - check if first cell contains header text
+                if (firstCellText === 'ID' || firstCellText === 'Task' || firstCellText.includes('ID') || firstCellText.includes('Task')) {{
+                    return;
+                }}
+                
+                // Skip if first cell is not a valid ID (should be numeric)
+                if (!firstCellText.match(/^\\d+$/)) {{
+                    return;
+                }}
+                
+                const rowData = cells.map(cell => {{
+                    const input = cell.querySelector('input');
+                    if (input) {{
+                        return input.value;
+                    }} else {{
+                        // Handle formatted content
+                        if (cell.querySelector('.tag')) {{
+                            const tags = Array.from(cell.querySelectorAll('.tag')).map(tag => tag.textContent);
+                            return tags.join(', ');
+                        }} else if (cell.querySelector('.status-done')) {{
+                            return 'done';
+                        }} else {{
+                            return cell.textContent.trim();
+                        }}
+                    }}
+                }});
+                
+                // Only add if we have a valid ID and haven't seen it before
+                if (rowData[0] && rowData[0] !== '' && !seenIds.has(rowData[0])) {{
+                    allRows.push(rowData);
+                    seenIds.add(rowData[0]);
+                }}
+            }});
+            
+            // Sort by ID
+            allRows.sort((a, b) => {{
+                const idA = parseInt(a[0]) || 0;
+                const idB = parseInt(b[0]) || 0;
+                return idA - idB;
+            }});
+            
+            // Add rows to CSV
+            allRows.forEach(row => {{
                 const escapedRow = row.map(cell => {{
-                    // Always quote fields that contain commas, quotes, or newlines
                     if (cell.includes(',') || cell.includes('"') || cell.includes('\\n') || cell.includes('\\r')) {{
                         return '"' + cell.replace(/"/g, '""') + '"';
                     }}
@@ -384,30 +451,26 @@ def create_html_preview(csv_path, output_path=None):
                 csvContent += escapedRow.join(',') + '\\n';
             }});
             
-            // Create blob with proper MIME type
+            // Create and download blob
             const blob = new Blob([csvContent], {{ 
                 type: 'text/csv;charset=utf-8;',
                 endings: 'native'
             }});
             
-            // Use a simple, reliable download method
             const url = URL.createObjectURL(blob);
             const link = document.createElement('a');
             link.href = url;
             link.download = 'tasks_updated.csv';
             link.style.display = 'none';
             
-            // Add to DOM, click, and remove
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
             
-            // Clean up the URL after a short delay
             setTimeout(() => {{
                 URL.revokeObjectURL(url);
             }}, 100);
             
-            // Show success message
             const status = document.querySelector('.status');
             status.textContent = 'CSV file downloaded successfully!';
             status.className = 'status success';
@@ -537,12 +600,12 @@ def create_html_preview(csv_path, output_path=None):
     # Add sections
     html_content += create_table_section(today_tasks, "Tasks for Today", "")
     html_content += create_table_section(week_tasks, "Tasks This Week", "")
-    html_content += create_table_section(all_tasks, "All Tasks", "")
+    html_content += create_table_section(other_tasks, "Other Tasks", "")
     
     # Calculate stats
-    total_tasks = len(all_tasks)
-    done_tasks = len([row for row in all_tasks if row[-1].lower() == 'done'])
-    high_priority = len([row for row in all_tasks if 'high' in str(row).lower()])
+    total_tasks = len(data)
+    done_tasks = len([row for row in data if row[-1].lower() == 'done'])
+    high_priority = len([row for row in data if 'high' in str(row).lower()])
     
     html_content += f'''
         </div>
