@@ -397,7 +397,10 @@ def create_html_preview(csv_path, output_path=None):
                 // Skip if no cells or if first cell looks like a header
                 if (cells.length === 0) return;
                 
-                const firstCellText = cells[0].textContent.trim();
+                // Get the first cell content (either from input or text)
+                const firstCell = cells[0];
+                const firstCellInput = firstCell.querySelector('input');
+                const firstCellText = firstCellInput ? firstCellInput.value : firstCell.textContent.trim();
                 
                 // Skip header rows - check if first cell contains header text
                 if (firstCellText === 'ID' || firstCellText === 'Task' || firstCellText.includes('ID') || firstCellText.includes('Task')) {{
@@ -425,6 +428,9 @@ def create_html_preview(csv_path, output_path=None):
                         }}
                     }}
                 }});
+                
+                // Debug: log the row data to see what we're getting
+                console.log('Row data:', rowData);
                 
                 // Only add if we have a valid ID and haven't seen it before
                 if (rowData[0] && rowData[0] !== '' && !seenIds.has(rowData[0])) {{
