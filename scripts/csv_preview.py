@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 from datetime import datetime, timedelta
 import locale
+import re
 
 def parse_date(date_str):
     """Parse date string in DD.MM.YYYY format"""
@@ -62,11 +63,167 @@ def categorize_tasks(data, headers):
     
     return today_tasks, week_tasks, other_tasks
 
+def parse_recurring_interval(recurring_str):
+    """Parse recurring interval string (e.g., '1 week', '2 days', '1 month')"""
+    if not recurring_str or recurring_str.strip() == '':
+        return None
+    
+    recurring_str = recurring_str.strip().lower()
+    
+    # Match patterns like "1 week", "2 days", "1 month", "3 days"
+    match = re.match(r'(\d+)\s+(day|week|month|year)s?', recurring_str)
+    if not match:
+        return None
+    
+    value = int(match.group(1))
+    unit = match.group(2)
+    
+    if unit == 'day':
+        return timedelta(days=value)
+    elif unit == 'week':
+        return timedelta(weeks=value)
+    elif unit == 'month':
+        # Approximate month as 30 days
+        return timedelta(days=value * 30)
+    elif unit == 'year':
+        # Approximate year as 365 days
+        return timedelta(days=value * 365)
+    
+    return None
+
+def get_next_id(data):
+    """Get the next available ID for new tasks"""
+    max_id = 0
+    for row in data:
+        if row and row[0] and row[0].strip():
+            try:
+                task_id = int(row[0])
+                max_id = max(max_id, task_id)
+            except ValueError:
+                continue
+    return f"{max_id + 1:04d}"
+
+def find_existing_recurring_task(data, task_name, recurring_interval):
+    """Check if a recurring task with the same name and interval already exists and is NOT done"""
+    for row in data:
+        if not row or len(row) < 8:
+            continue
+        
+        # Check if it's the same task name and has the same recurring interval
+        # AND is not marked as done
+        is_done = False
+        if len(row) > 10 and row[10].lower() == 'done':  # Status column
+            is_done = True
+        
+        if (row[1] == task_name and 
+            len(row) > 7 and 
+            row[7] == recurring_interval and
+            not is_done):
+            return True
+    return False
+
+def process_recurring_tasks(data, headers):
+    """Process recurring tasks and create new instances for completed ones"""
+    
+    # Find column indices
+    status_idx = None
+    recurring_idx = None
+    done_idx = None
+    due_date_idx = None
+    added_idx = None
+    
+    for i, header in enumerate(headers):
+        if header.lower() == 'status':
+            status_idx = i
+        elif header.lower() == 'recurring':
+            recurring_idx = i
+        elif header.lower() == 'done':
+            done_idx = i
+        elif 'due' in header.lower() and 'date' in header.lower():
+            due_date_idx = i
+        elif header.lower() == 'added':
+            added_idx = i
+    
+    new_tasks = []
+    processed_data = data.copy()
+    
+    # Process each row
+    for row in data:
+        if not row or len(row) < max(status_idx or 0, recurring_idx or 0, done_idx or 0, due_date_idx or 0) + 1:
+            continue
+        
+        # Check if task is done and has recurring interval
+        is_done = (status_idx is not None and 
+                  len(row) > status_idx and 
+                  row[status_idx].lower() == 'done')
+        
+        has_recurring = (recurring_idx is not None and 
+                        len(row) > recurring_idx and 
+                        row[recurring_idx].strip() != '')
+        
+        if is_done and has_recurring:
+            recurring_interval = row[recurring_idx]
+            task_name = row[1] if len(row) > 1 else ''
+            
+            # Parse the recurring interval
+            interval_delta = parse_recurring_interval(recurring_interval)
+            
+            if interval_delta:
+                # Get the done date
+                done_date = None
+                if done_idx is not None and len(row) > done_idx and row[done_idx].strip():
+                    done_date = parse_date(row[done_idx])
+                
+                # If no done date, use due date
+                if not done_date and due_date_idx is not None and len(row) > due_date_idx:
+                    done_date = parse_date(row[due_date_idx])
+                
+                # If still no date, use today
+                if not done_date:
+                    done_date = datetime.now()
+                
+                # Calculate next due date
+                next_due_date = done_date + interval_delta
+                
+                # Check if this recurring task already exists
+                if not find_existing_recurring_task(processed_data + new_tasks, task_name, recurring_interval):
+                    # Create new task
+                    new_task = row.copy()
+                    new_task[0] = get_next_id(processed_data + new_tasks)  # New ID
+                    
+                    # Update due date
+                    if due_date_idx is not None and len(new_task) > due_date_idx:
+                        new_task[due_date_idx] = next_due_date.strftime('%d.%m.%Y')
+                    
+                    # Clear done date and status
+                    if done_idx is not None and len(new_task) > done_idx:
+                        new_task[done_idx] = ''
+                    if status_idx is not None and len(new_task) > status_idx:
+                        new_task[status_idx] = ''
+                    
+                    # Update added date to today
+                    if added_idx is not None and len(new_task) > added_idx:
+                        new_task[added_idx] = datetime.now().strftime('%d.%m.%Y')
+                    
+                    new_tasks.append(new_task)
+                    print(f"✅ Created recurring task: {task_name} (due: {next_due_date.strftime('%d.%m.%Y')})")
+                else:
+                    print(f"⚠️  Skipping duplicate recurring task: {task_name}")
+    
+    # Add new tasks to the data
+    processed_data.extend(new_tasks)
+    
+    return processed_data, len(new_tasks)
+
 def create_html_preview(csv_path, output_path=None):
     """Create a beautiful HTML preview of a CSV file"""
     
     if output_path is None:
-        output_path = csv_path.replace('.csv', '_preview.html')
+        # Save HTML to temp directory
+        temp_dir = Path('data/temp')
+        temp_dir.mkdir(exist_ok=True)
+        csv_filename = Path(csv_path).stem
+        output_path = temp_dir / f"{csv_filename}_preview.html"
     
     # Read CSV data
     data = []
@@ -77,7 +234,24 @@ def create_html_preview(csv_path, output_path=None):
         headers = next(reader)
         data = list(reader)
     
-    # Categorize tasks
+    # Process recurring tasks
+    print("🔄 Processing recurring tasks...")
+    data, new_recurring_count = process_recurring_tasks(data, headers)
+    
+    if new_recurring_count > 0:
+        print(f"✅ Created {new_recurring_count} new recurring tasks")
+        # Save updated CSV
+        updated_csv_path = csv_path.replace('.csv', '_updated.csv')
+        with open(updated_csv_path, 'w', encoding='utf-8', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(headers)
+            writer.writerows(data)
+        print(f"💾 Updated CSV saved: {updated_csv_path}")
+        
+        # Use the updated data for the HTML preview
+        print("📊 Generating HTML preview with updated data...")
+    
+    # Categorize tasks (using the processed data with new recurring tasks)
     today_tasks, week_tasks, other_tasks = categorize_tasks(data, headers)
     
     # Generate HTML
@@ -381,7 +555,7 @@ def create_html_preview(csv_path, output_path=None):
         
         function downloadCSV() {{
             // Start with just the header once - use original headers
-            const originalHeaders = ['ID', 'Task', 'Tag', 'Due date', 'Deadline', 'Recurring', 'Priority', 'Depends on', 'Status'];
+            const originalHeaders = ['ID', 'Task', 'Tag', 'Added', 'Due date', 'Done', 'Deadline', 'Recurring', 'Priority', 'Depends on', 'Status'];
             let csvContent = originalHeaders.join(',') + '\\n';
             
             // Get all data rows (not header rows) from all sections
@@ -649,6 +823,10 @@ def create_html_preview(csv_path, output_path=None):
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python csv_preview.py <csv_file> [output_html]")
+        print("Features:")
+        print("  - Creates beautiful HTML preview of tasks")
+        print("  - Automatically processes recurring tasks")
+        print("  - Organizes tasks by Today, This Week, All Tasks")
         sys.exit(1)
     
     csv_path = sys.argv[1]
